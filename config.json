@@ -1,0 +1,113 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "name": "Défaut",
+      "pages": [
+        {
+          "name": "Page 1",
+          "zones": {
+            "0,0": {
+              "label": "Chrome",
+              "action": "launch",
+              "params": {
+                "target": "chrome"
+              },
+              "color": "#2b7cff"
+            },
+            "1,0": {
+              "label": "Explorateur",
+              "action": "launch",
+              "params": {
+                "target": "explorer"
+              },
+              "color": "#ffb000"
+            },
+            "2,0": {
+              "label": "Bloc-notes",
+              "action": "launch",
+              "params": {
+                "target": "notepad"
+              },
+              "color": "#00c8c8"
+            },
+            "0,1": {
+              "label": "Vol −",
+              "action": "volume_down",
+              "params": {
+                "steps": "2"
+              },
+              "color": "#00a000"
+            },
+            "1,1": {
+              "label": "Muet",
+              "action": "mute",
+              "params": {},
+              "color": "#a00000"
+            },
+            "2,1": {
+              "label": "Vol +",
+              "action": "volume_up",
+              "params": {
+                "steps": "2"
+              },
+              "color": "#00ff00"
+            },
+            "3,1": {
+              "label": "Lecture",
+              "action": "play_pause",
+              "params": {},
+              "color": "#ffffff"
+            },
+            "0,2": {
+              "label": "Copier",
+              "action": "hotkey",
+              "params": {
+                "keys": "ctrl+c"
+              },
+              "color": "#ff6a00"
+            },
+            "1,2": {
+              "label": "Coller",
+              "action": "hotkey",
+              "params": {
+                "keys": "ctrl+v"
+              },
+              "color": "#ff2ad4"
+            },
+            "2,2": {
+              "label": "Copier-coller",
+              "action": "macro",
+              "params": {
+                "steps": "touche ctrl+c\nattendre 0.2\ntouche ctrl+v"
+              },
+              "color": "#b000ff"
+            },
+            "3,3": {
+              "label": "Page suiv.",
+              "action": "page_next",
+              "params": {},
+              "color": "#404040"
+            }
+          }
+        },
+        {
+          "name": "Page 2",
+          "zones": {
+            "3,3": {
+              "label": "Page préc.",
+              "action": "page_prev",
+              "params": {},
+              "color": "#404040"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "active_profile": 0,
+  "active_page": 0,
+  "feedback": true,
+  "feedback_amount": 0.6,
+  "debounce_ms": 150
+}
