@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from bleak import BleakScanner  # noqa: E402
 
-from tools.ble_diagnostics.ble_midi import MIDI_SERVICE_UUID  # noqa: E402
+from roli_blocks.ble_midi import MIDI_SERVICE_UUID  # noqa: E402
 from tools.ble_diagnostics.common import run, setup_logging  # noqa: E402
 
 

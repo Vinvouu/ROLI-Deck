@@ -1,17 +1,19 @@
-"""Interface Tkinter : grille des zones, éditeur d'action, profils et pages."""
+"""Tkinter GUI: zone grid, action editor, profiles/pages, USB + Bluetooth link status."""
 
 from __future__ import annotations
 
+import logging
 import threading
 import tkinter as tk
-from pathlib import Path
 from tkinter import colorchooser, messagebox, simpledialog, ttk
 
 from . import actions
+from .ble import BleError, FoundPad
 from .model import N_COLS, N_ROWS, Config, Page, Profile, Zone, zone_key
-from .pad import PadController
+from .pad import LinkState, PadController
+from .paths import CONFIG_PATH
 
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
+log = logging.getLogger(__name__)
 
 COLOR_PRESETS: list[tuple[str, str]] = [
     ("Rouge", "#ff0000"), ("Orange", "#ff6a00"), ("Jaune", "#ffd000"), ("Vert", "#00ff00"),
@@ -24,6 +26,13 @@ CUSTOM_LABEL = "Personnalisée…"
 CELL = 96
 CELL_GAP = 14
 
+STATE_DOT = {
+    LinkState.DISCONNECTED: "#7a7a7a",
+    LinkState.SEARCHING: "#e6b400",
+    LinkState.USB: "#2ecc40",
+    LinkState.BLE: "#2b7cff",
+}
+
 
 def _contrast(hex_color: str) -> str:
     s = hex_color.lstrip("#")
@@ -34,15 +43,14 @@ def _contrast(hex_color: str) -> str:
 class App:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        root.title("Lightpad — pad de commandes")
-        root.minsize(900, 560)
+        root.title("ROLI Deck — pad de commandes")
+        root.minsize(960, 600)
 
         self.config = Config.load(CONFIG_PATH)
         self.selected: tuple[int, int] = (0, 0)
         self.param_widgets: dict[str, tk.Widget] = {}
-        self._connecting = False
-        self.auto_reconnect = True
-        self._poll_ticks = 0
+        self._ble_dialog: BluetoothDialog | None = None
+        self._last_tray_key: tuple | None = None
 
         self.pad = PadController(
             get_page=lambda: self.config.page,
@@ -50,12 +58,15 @@ class App:
             feedback_enabled=lambda: self.config.feedback,
             feedback_amount=lambda: self.config.feedback_amount,
             debounce_ms=lambda: self.config.debounce_ms,
+            get_ble_address=lambda: self.config.ble_address,
         )
+        self.pad.on_state_change = lambda: self.root.after(0, self._update_status)
 
         self._build()
+        self.tray = self._make_tray()
         self.refresh_all()
-        root.protocol("WM_DELETE_WINDOW", self.on_close)
-        root.after(300, self._auto_connect)
+        root.protocol("WM_DELETE_WINDOW", self.on_close_button)
+        self.pad.start()
         root.after(500, self._poll)
 
     # ------------------------------------------------------------------ construction
@@ -90,13 +101,26 @@ class App:
         ttk.Checkbutton(top, text="Retour visuel à l'appui", variable=self.feedback_var,
                         command=self._toggle_feedback).pack(side="left")
 
-        self.connect_btn = ttk.Button(top, text="Connecter le pad", command=self._toggle_connect)
-        self.connect_btn.pack(side="right")
+        # --- link bar (USB / Bluetooth)
+        link = ttk.Frame(self.root, padding=(8, 0, 8, 6))
+        link.pack(fill="x")
+        self.dot = tk.Canvas(link, width=16, height=16, highlightthickness=0)
+        self.dot.pack(side="left")
+        self._dot_id = self.dot.create_oval(2, 2, 14, 14, fill=STATE_DOT[LinkState.DISCONNECTED], outline="")
+        self.link_label = ttk.Label(link, text="", font=("Segoe UI", 9, "bold"))
+        self.link_label.pack(side="left", padx=(6, 12))
+        self.link_detail = ttk.Label(link, text="", foreground="#666")
+        self.link_detail.pack(side="left", fill="x", expand=True)
+        self.forget_btn = ttk.Button(link, text="Oublier ce pad", command=self._forget_ble)
+        self.forget_btn.pack(side="right")
+        self.disconnect_btn = ttk.Button(link, text="Déconnecter", command=self._toggle_disconnect)
+        self.disconnect_btn.pack(side="right", padx=6)
+        ttk.Button(link, text="Connecter en Bluetooth…", command=self.open_bluetooth_dialog).pack(side="right")
 
         body = ttk.Frame(self.root, padding=8)
         body.pack(fill="both", expand=True)
 
-        # --- grille
+        # --- grid
         left = ttk.Frame(body)
         left.pack(side="left", fill="y")
         size_w = N_COLS * CELL + (N_COLS + 1) * CELL_GAP
@@ -107,7 +131,7 @@ class App:
         ttk.Label(left, text="Clique sur une zone pour l'éditer. L'orientation est celle du pad "
                             "(bouton en bas).", wraplength=size_w, foreground="#666").pack(pady=(6, 0))
 
-        # --- éditeur
+        # --- editor
         right = ttk.LabelFrame(body, text="Zone", padding=10)
         right.pack(side="left", fill="both", expand=True, padx=(12, 0))
         self.editor = right
@@ -147,7 +171,7 @@ class App:
         ttk.Button(btns, text="Effacer la zone", command=self._clear_zone).pack(side="left")
         right.columnconfigure(1, weight=1)
 
-        # --- barre d'état
+        # --- status bar
         status = ttk.Frame(self.root, padding=(8, 4))
         status.pack(fill="x", side="bottom")
         self.pad_status = ttk.Label(status, text="")
@@ -155,7 +179,20 @@ class App:
         self.msg = ttk.Label(status, text="", foreground="#06c")
         self.msg.pack(side="right")
 
-    # ------------------------------------------------------------------ rafraîchissement
+    def _make_tray(self):
+        try:
+            from .tray import TrayIcon
+
+            return TrayIcon(
+                on_show=lambda: self.root.after(0, self.show_window),
+                on_bluetooth=lambda: self.root.after(0, lambda: (self.show_window(), self.open_bluetooth_dialog())),
+                on_quit=lambda: self.root.after(0, self.quit),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("tray icon unavailable: %s", exc)
+            return None
+
+    # ------------------------------------------------------------------ refresh
 
     def refresh_all(self) -> None:
         cfg = self.config
@@ -166,6 +203,7 @@ class App:
         self.feedback_var.set(cfg.feedback)
         self.draw_grid()
         self.load_editor()
+        self._update_status()
 
     def draw_grid(self) -> None:
         self.canvas.delete("all")
@@ -240,7 +278,7 @@ class App:
         self.swatch.configure(bg=self.color_hex)
         self.swatch_hex.configure(text=self.color_hex)
 
-    # ------------------------------------------------------------------ éditeur : événements
+    # ------------------------------------------------------------------ editor events
 
     def _on_canvas_click(self, ev: tk.Event) -> None:
         for r in range(N_ROWS):
@@ -257,7 +295,6 @@ class App:
         t = actions.ACTIONS_BY_LABEL[self.action_var.get()]
         z = self.config.page.get(*self.selected)
         self._build_params(t, z.params if z and z.action == t.id else {})
-        # Couleur proposée par défaut si la zone n'en a pas encore une personnalisée.
         previous = actions.ACTIONS_BY_ID[z.action].default_color if z else "#000000"
         if self.color_hex in ("#000000", previous):
             self._set_color(t.default_color)
@@ -266,10 +303,7 @@ class App:
         name = self.color_var.get()
         if name == CUSTOM_LABEL:
             _rgb, hex_color = colorchooser.askcolor(color=self.color_hex, title="Couleur de la zone")
-            if hex_color:
-                self._set_color(hex_color)
-            else:
-                self._set_color(self.color_hex)
+            self._set_color(hex_color or self.color_hex)
             return
         self._set_color(dict(COLOR_PRESETS)[name])
 
@@ -280,21 +314,19 @@ class App:
             self.config.page.clear(c, r)
         else:
             self.config.page.zones[zone_key(c, r)] = Zone(
-                label=self.label_var.get().strip(),
-                action=t.id,
-                params=self._read_params(),
-                color=self.color_hex,
+                label=self.label_var.get().strip(), action=t.id,
+                params=self._read_params(), color=self.color_hex,
             )
         self.save()
         self.draw_grid()
-        self.pad.render()
+        self._render_async()
         self.flash("Zone enregistrée.")
 
     def _clear_zone(self) -> None:
         self.config.page.clear(*self.selected)
         self.save()
         self.refresh_all()
-        self.pad.render()
+        self._render_async()
 
     def _test_zone(self) -> None:
         t = actions.ACTIONS_BY_LABEL[self.action_var.get()]
@@ -302,9 +334,9 @@ class App:
         delay = 2000 if t.keyboard else 0
         if delay:
             self.flash("Bascule vers la fenêtre cible : exécution dans 2 s…")
-        self.root.after(delay, lambda: self._run(zone))
+        self.root.after(delay, lambda: threading.Thread(target=self._run, args=(zone,), daemon=True).start())
 
-    # ------------------------------------------------------------------ profils / pages
+    # ------------------------------------------------------------------ profiles / pages
 
     def _select_profile(self) -> None:
         self.config.set_profile(self.profile_cb.current())
@@ -364,14 +396,18 @@ class App:
     def _after_nav(self) -> None:
         self.save()
         self.refresh_all()
-        self.pad.render()
+        self._render_async()
 
     def _toggle_feedback(self) -> None:
         self.config.feedback = self.feedback_var.get()
         self.save()
-        self.pad.render()
+        self._render_async()
 
-    # ------------------------------------------------------------------ navigation (depuis le pad)
+    def _render_async(self) -> None:
+        # LED frames go over USB or BLE; never block the GUI thread on them.
+        threading.Thread(target=self.pad.render, daemon=True).start()
+
+    # ------------------------------------------------------------------ navigation from the pad
 
     def next_page(self) -> None:
         self.config.next_page()
@@ -392,12 +428,11 @@ class App:
 
     def _nav_from_pad(self) -> None:
         self.pad.render()
-        self.root.after(0, self._after_nav)
+        self.root.after(0, lambda: (self.save(), self.refresh_all()))
 
-    # ------------------------------------------------------------------ exécution des actions
+    # ------------------------------------------------------------------ actions
 
     def _on_zone_press(self, col: int, row: int) -> None:
-        """Appelé depuis le thread du pad : exécute l'action dans un thread dédié."""
         zone = self.config.page.get(col, row)
         if zone is None or zone.is_empty:
             return
@@ -408,64 +443,223 @@ class App:
             actions.run_action(zone, nav=self)
             text = f"Action exécutée : {zone.label or actions.describe(zone)}"
         except Exception as exc:  # noqa: BLE001
+            log.warning("action failed: %s", exc)
             text = f"Échec de l'action « {zone.label} » : {exc}"
         self.root.after(0, lambda: self.flash(text))
 
-    # ------------------------------------------------------------------ pad
+    # ------------------------------------------------------------------ link / Bluetooth
 
-    def _auto_connect(self) -> None:
-        """Tentative de connexion en arrière-plan (une seule à la fois)."""
-        if self._connecting or self.pad.connected:
+    def _update_status(self) -> None:
+        state = self.pad.state
+        self.dot.itemconfigure(self._dot_id, fill=STATE_DOT[state])
+        label = state.label
+        if state in (LinkState.USB, LinkState.BLE) and self.pad.battery is not None:
+            label += f" · batterie {self.pad.battery} %" + (" (en charge)" if self.pad.charging else "")
+        self.link_label.configure(text=label)
+        detail = self.pad.message if state not in (LinkState.USB, LinkState.BLE) else self.pad.info
+        if self.config.ble_address and state != LinkState.BLE:
+            detail += f"   [pad Bluetooth mémorisé : {self.config.ble_name or self.config.ble_address}]"
+        self.link_detail.configure(text=detail)
+        self.forget_btn.state(["!disabled"] if self.config.ble_address else ["disabled"])
+        self.disconnect_btn.configure(text="Reprendre" if self.pad._ble_suspended and not self.pad.connected
+                                      else "Déconnecter")
+        if self.tray is not None:
+            key = (state, label)
+            if key != self._last_tray_key:
+                self._last_tray_key = key
+                self.tray.update(state, label)
+
+    def _poll(self) -> None:
+        self._update_status()
+        text = ""
+        if self.pad.last_press is not None:
+            c, r = self.pad.last_press
+            text = f"Dernier appui : zone {c + 1},{r + 1}"
+        self.pad_status.configure(text=text)
+        self.root.after(500, self._poll)
+
+    def _toggle_disconnect(self) -> None:
+        if self.pad._ble_suspended and not self.pad.connected:
+            self.pad.resume()
+        else:
+            threading.Thread(target=self.pad.disconnect, daemon=True).start()
+
+    def _forget_ble(self) -> None:
+        if not self.config.ble_address:
             return
-        self._connecting = True
+        name = self.config.ble_name or self.config.ble_address
+        if not messagebox.askyesno("Oublier ce pad", f"Ne plus se reconnecter automatiquement à « {name} » ?"):
+            return
+        self.config.ble_address = None
+        self.config.ble_name = ""
+        self.save()
+        if self.pad.state == LinkState.BLE:
+            threading.Thread(target=self.pad.disconnect, daemon=True).start()
+        self.pad.resume()
+        self._update_status()
+        self.flash("Pad Bluetooth oublié.")
+
+    def open_bluetooth_dialog(self) -> None:
+        if self._ble_dialog is not None and self._ble_dialog.winfo_exists():
+            self._ble_dialog.lift()
+            return
+        self._ble_dialog = BluetoothDialog(self)
+
+    def ble_pad_chosen(self, pad: FoundPad) -> None:
+        """Called by the dialog (on the Tk thread) once the user picked a pad."""
 
         def work() -> None:
             try:
-                self.pad.connect()
-            finally:
-                self._connecting = False
+                known, paired = self.pad.ble.pairing_state(pad.address)
+                if paired:
+                    answer = self._ask_on_main(
+                        "Appairage Windows détecté",
+                        f"« {pad.name} » est appairé dans Windows. Cet appairage empêche souvent la "
+                        "connexion directe (le pad se connecte une seconde puis se coupe).\n\n"
+                        "Retirer l'appairage Windows maintenant ?")
+                    if answer:
+                        status = self.pad.ble.unpair(pad.address)
+                        self._flash_on_main(f"Appairage retiré ({status}).")
+                self.config.ble_address = pad.address
+                self.config.ble_name = pad.name
+                self.root.after(0, self.save)
+                self._flash_on_main(f"Connexion à {pad.name}…")
+                self.pad.connect_ble(pad.address)
+                self._flash_on_main(f"Connecté en Bluetooth à {pad.name}.")
+                self.pad.request_ble_now()
+            except BleError as exc:
+                log.warning("bluetooth connect failed: %s", exc)
+                self.root.after(0, lambda: messagebox.showerror("Bluetooth", str(exc)))
+                self.pad.request_ble_now()
+            except Exception as exc:  # noqa: BLE001
+                log.exception("bluetooth connect crashed")
+                self.root.after(0, lambda: messagebox.showerror("Bluetooth", f"Erreur inattendue : {exc}"))
+            self.root.after(0, self._update_status)
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _toggle_connect(self) -> None:
-        if self.pad.connected:
-            self.auto_reconnect = False
-            threading.Thread(target=self.pad.disconnect, daemon=True).start()
-        else:
-            self.auto_reconnect = True
-            self._auto_connect()
+    def _ask_on_main(self, title: str, text: str) -> bool:
+        done = threading.Event()
+        result = {"value": False}
 
-    def _poll(self) -> None:
-        # Reconnexion automatique toutes les 5 s tant que le pad est absent
-        # (pad en veille, câble rebranché…), sauf déconnexion volontaire.
-        self._poll_ticks += 1
-        if self.auto_reconnect and not self.pad.connected and self._poll_ticks % 10 == 0:
-            self._auto_connect()
-        text = self.pad.status
-        if self.pad.connected and self.pad.info:
-            text += f" — {self.pad.info}"
-        if self.pad.last_press is not None:
-            c, r = self.pad.last_press
-            text += f" — dernier appui : zone {c + 1},{r + 1}"
-        self.pad_status.configure(text=text)
-        self.connect_btn.configure(text="Déconnecter le pad" if self.pad.connected else "Connecter le pad")
-        self.root.after(500, self._poll)
+        def ask() -> None:
+            result["value"] = messagebox.askyesno(title, text, parent=self.root)
+            done.set()
 
-    # ------------------------------------------------------------------ divers
+        self.root.after(0, ask)
+        done.wait()
+        return result["value"]
+
+    def _flash_on_main(self, text: str) -> None:
+        self.root.after(0, lambda: self.flash(text))
+
+    # ------------------------------------------------------------------ misc
 
     def save(self) -> None:
         self.config.save(CONFIG_PATH)
 
     def flash(self, text: str) -> None:
         self.msg.configure(text=text)
-        self.root.after(5000, lambda: self.msg.configure(text="") if self.msg.cget("text") == text else None)
+        self.root.after(6000, lambda: self.msg.configure(text="") if self.msg.cget("text") == text else None)
 
-    def on_close(self) -> None:
+    def show_window(self) -> None:
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def on_close_button(self) -> None:
+        """Closing the window keeps the pad running from the tray; Quit is in the tray menu."""
+        self.save()
+        if self.tray is not None:
+            self.root.withdraw()
+            self.tray.notify("ROLI Deck continue dans la barre des tâches. Clic droit sur l'icône pour quitter.")
+        else:
+            self.quit()
+
+    def quit(self) -> None:
         self.save()
         try:
-            self.pad.disconnect()
+            self.pad.stop()
         finally:
+            if self.tray is not None:
+                self.tray.stop()
             self.root.destroy()
+
+
+class BluetoothDialog(tk.Toplevel):
+    """Scan for Lightpads, show them with signal strength, connect in one click."""
+
+    def __init__(self, app: App) -> None:
+        super().__init__(app.root)
+        self.app = app
+        self.title("Connecter en Bluetooth")
+        self.resizable(False, False)
+        self.transient(app.root)
+        self.pads: list[FoundPad] = []
+
+        frame = ttk.Frame(self, padding=12)
+        frame.pack(fill="both", expand=True)
+        self.info = ttk.Label(frame, text="Le pad doit être allumé et débranché de l'USB.", wraplength=420)
+        self.info.pack(anchor="w")
+        self.status = ttk.Label(frame, text="", foreground="#06c")
+        self.status.pack(anchor="w", pady=(4, 6))
+        self.listbox = tk.Listbox(frame, width=60, height=6, font=("Segoe UI", 10))
+        self.listbox.pack()
+        self.listbox.bind("<Double-Button-1>", lambda _e: self._connect())
+        btns = ttk.Frame(frame)
+        btns.pack(fill="x", pady=(10, 0))
+        self.scan_btn = ttk.Button(btns, text="Rechercher à nouveau", command=self._scan)
+        self.scan_btn.pack(side="left")
+        self.connect_btn = ttk.Button(btns, text="Connecter", command=self._connect)
+        self.connect_btn.pack(side="right")
+        ttk.Button(btns, text="Fermer", command=self.destroy).pack(side="right", padx=6)
+        self._scan()
+
+    def _scan(self) -> None:
+        self.status.configure(text="Recherche en cours (6 s)…")
+        self.listbox.delete(0, "end")
+        self.scan_btn.state(["disabled"])
+        self.connect_btn.state(["disabled"])
+
+        def work() -> None:
+            try:
+                pads = self.app.pad.ble.scan(6.0)
+                self.after(0, lambda: self._show(pads))
+            except BleError as exc:
+                self.after(0, lambda: self._fail(str(exc)))
+            except Exception as exc:  # noqa: BLE001
+                self.after(0, lambda: self._fail(f"Erreur inattendue : {exc}"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show(self, pads: list[FoundPad]) -> None:
+        if not self.winfo_exists():
+            return
+        self.pads = pads
+        self.scan_btn.state(["!disabled"])
+        if not pads:
+            self.status.configure(text="Aucun Lightpad trouvé. Vérifie qu'il est allumé, débranché de l'USB "
+                                       "et non connecté à un autre appareil.")
+            return
+        self.status.configure(text=f"{len(pads)} pad(s) trouvé(s). Sélectionne-en un puis Connecter.")
+        for p in pads:
+            self.listbox.insert("end", f"{p.name}   {p.address}   {p.signal_label} ({p.rssi} dBm)")
+        self.listbox.selection_set(0)
+        self.connect_btn.state(["!disabled"])
+
+    def _fail(self, text: str) -> None:
+        if not self.winfo_exists():
+            return
+        self.scan_btn.state(["!disabled"])
+        self.status.configure(text=text)
+
+    def _connect(self) -> None:
+        sel = self.listbox.curselection()
+        if not sel or not self.pads:
+            return
+        pad = self.pads[sel[0]]
+        self.destroy()
+        self.app.ble_pad_chosen(pad)
 
 
 def run() -> None:

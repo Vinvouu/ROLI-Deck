@@ -16,7 +16,7 @@ from bleak import BleakClient, BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
-from .ble_midi import MIDI_CHAR_UUID, MIDI_SERVICE_UUID, BleMidiParser, MidiEvent
+from roli_blocks.ble_midi import MIDI_CHAR_UUID, MIDI_SERVICE_UUID, BleMidiParser, MidiEvent
 
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 DEFAULT_NAME = "Lightpad"

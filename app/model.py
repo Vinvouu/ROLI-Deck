@@ -127,6 +127,9 @@ class Config:
     feedback: bool = True
     feedback_amount: float = 0.6
     debounce_ms: int = 150
+    # Bluetooth pad remembered for automatic reconnection (None = none chosen).
+    ble_address: str | None = None
+    ble_name: str = ""
 
     # ------------------------------------------------------------ navigation
 
@@ -183,6 +186,8 @@ class Config:
             feedback=d.get("feedback", True),
             feedback_amount=d.get("feedback_amount", 0.6),
             debounce_ms=d.get("debounce_ms", 150),
+            ble_address=d.get("ble_address") or None,
+            ble_name=d.get("ble_name", ""),
         )
         return cfg
 

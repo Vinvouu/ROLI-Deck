@@ -2,8 +2,12 @@
 python-rtmidi>=1.5.8
 # Bluetooth Low Energy (BLE MIDI) ; installe aussi les paquets winrt-* sous Windows
 bleak>=3.0
+# Icône de la barre des tâches
+pystray>=0.19
+pillow>=10
 # Lecture MIDI classique (script Test_ROLI.py)
 mido>=1.3
 
 # Développement
 pytest>=8
+pyinstaller>=6

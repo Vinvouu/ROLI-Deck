@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tools.ble_diagnostics.ble_midi import BleMidiParser, MidiEvent, encode_packets, message_length
+from roli_blocks.ble_midi import BleMidiParser, MidiEvent, encode_packets, message_length
 
 
 def hdr(ts: int) -> int:

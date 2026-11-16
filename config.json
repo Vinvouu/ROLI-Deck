@@ -109,5 +109,7 @@
   "active_page": 0,
   "feedback": true,
   "feedback_amount": 0.6,
-  "debounce_ms": 150
+  "debounce_ms": 150,
+  "ble_address": "48:B6:20:12:D7:E2",
+  "ble_name": "Lightpad Block I3CQ"
 }
