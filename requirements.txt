@@ -1,5 +1,7 @@
 # Couche MIDI / protocole BLOCKS (pilotage des LEDs du Lightpad)
 python-rtmidi>=1.5.8
+# Bluetooth Low Energy (BLE MIDI) ; installe aussi les paquets winrt-* sous Windows
+bleak>=3.0
 # Lecture MIDI classique (script Test_ROLI.py)
 mido>=1.3
 

@@ -57,8 +57,15 @@ class Block:
 class BlockGroup:
     """Opens a single BLOCKS connection (one master + DNA chain) and dispatches events."""
 
-    def __init__(self, pair: MidiPortPair) -> None:
-        self._transport = Transport(pair)
+    def __init__(self, pair: MidiPortPair | None = None, *, transport=None) -> None:
+        # Either a MIDI port pair (USB transport) or any object exposing the
+        # Transport interface (send / poll_packets / wait_for_packet /
+        # start_pinging / update_ping_targets / close), e.g. a BLE transport.
+        if transport is None:
+            if pair is None:
+                raise ValueError("BlockGroup needs a MidiPortPair or a transport")
+            transport = Transport(pair)
+        self._transport = transport
         self._blocks: dict[int, Block] = {}  # by topology_index
         self._lock = threading.Lock()
         self._on_touch: list[TouchHandler] = []
